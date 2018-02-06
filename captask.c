@@ -45,25 +45,56 @@ static p_CapStateInstance capStateInstance_p;
 /** send cmd result to client */
 static void send_cmd_res(int fd , int cmd_type, char*cmd_buf, int cmd_buf_len, struct sockaddr * addr , socklen_t addrlen)
 {
-    char content[36];
+    char content[48];
     /*  the content byte
+     *  header 4
      *  type 4
      *  len 4
-     *  ifname 16
+     *  ifname 28
      *  ip  4
-     *  unused 4
-     *  unused 4
+     *  end	4
      * */
-    memset(content,0,36);
-    memcpy(content,&cmd_type,4);
+    memset(content,0,48);
+    memcpy(content, CONTENT_START, 4);
+    memcpy(content + 4,&cmd_type,4);
     if(cmd_buf_len>0)
     {
-        memcpy(content+4, &cmd_buf_len, cmd_buf_len);
-        memcpy(content+8, cmd_buf, cmd_buf_len);
+        memcpy(content+8, &cmd_buf_len, cmd_buf_len);
+        memcpy(content+12, cmd_buf, cmd_buf_len);
     }
-    if (sendto(fd, content, 36, 0, addr, addrlen ) == -1) {
+
+    memcpy(content+44, CONTENT_END, 4);
+    if (sendto(fd, content, 48, 0, addr, addrlen ) == -1) {
         perror("[Send Cmd Res] send cmd res error");
     }
+}
+
+static void send_packet_res(int fd ,unsigned char *packet_buf, int packet_buf_len, struct sockaddr * addr , socklen_t addrlen) {
+    /*
+     * the content packet
+     * header 4
+     * packet packet_buf_len
+     * end 4
+     */
+    int length = packet_buf_len + 12;
+    char *content;
+    content = (char *)malloc(length);
+    memset(content, 0, length);
+
+    memcpy(content, CONTENT_START, 4);
+    if (packet_buf_len > 0) {
+//		memcpy(content + 4,&packet_buf_len,4);
+        memcpy(content + 4, packet_buf, packet_buf_len);
+    }
+
+    memcpy(content + length - 4, CONTENT_END, 4);
+
+    if (sendto(fd, content, length, 0, addr, addrlen ) == -1) {
+        free(content);
+        perror("[Send Cmd Res] send cmd res error");
+    }
+
+    free(content);
 }
 
 static int write_ether_interfaces(int fd, struct sockaddr *clientAddr, socklen_t size)
@@ -86,17 +117,17 @@ static int write_ether_interfaces(int fd, struct sockaddr *clientAddr, socklen_t
     }
     for (intf = if_nidxs; intf->if_index != 0 || intf->if_name != NULL; intf++)
     {
-        char contentbuf[20];
+        char contentbuf[32];
         struct ifreq ifr;
 
         strcpy(ifr.ifr_name, intf->if_name);
         ioctl(sockfd, SIOCGIFADDR, &ifr);
 
-        memset(contentbuf, 0, 20);
-        memcpy( contentbuf, intf->if_name, 16);
-        memcpy(contentbuf+16, &((struct sockaddr_in*)&ifr.ifr_addr)->sin_addr, 4);
+        memset(contentbuf, 0, 32);
+        memcpy( contentbuf, intf->if_name, 28);
+        memcpy(contentbuf+28, &((struct sockaddr_in*)&ifr.ifr_addr)->sin_addr, 4);
 
-        send_cmd_res(fd, GetIf_Content, contentbuf, 20, clientAddr, size);
+        send_cmd_res(fd, GetIf_Content, contentbuf, 32, clientAddr, size);
 
         // printf("[if_nameindex] %s %d  %s\n", intf->if_name, intf->if_index  ,inet_ntoa(((struct sockaddr_in*)&ifr.ifr_addr)->sin_addr));
     }
@@ -179,12 +210,8 @@ static int ethernet_data_fetch()
             }
             recv_length = recvfrom(capStateInstance_p.sFd, capStateInstance_p.recv_buffer, RECV_BUFFER_SIZE, 0, NULL, NULL);
             buf_print((char *)capStateInstance_p.recv_buffer, recv_length);
-            if (sendto(clientFd, capStateInstance_p.recv_buffer,
-                       recv_length, 0,
-                       (struct sockaddr*)&servaddr,
-                       sizeof(servaddr)) == -1) {
-                perror("[Cap Task] send data failed");
-            }
+
+            send_packet_res(clientFd, capStateInstance_p.recv_buffer, recv_length, (struct sockaddr*)&servaddr, sizeof(servaddr));
         }
 
         Close(capStateInstance_p.sFd);
@@ -277,6 +304,10 @@ static void do_action(void) {
                 capStateInstance_p.cap_state = StopCap_State;
             }
             break;
+        }
+        case SetFilter_Cmd:
+        {
+            // memcpy(&capStateInstance_p.packetFilter, comCmdInfo->buf, sizeof(comCmdInfo->buf));
         }
         case CapIsEmpty_Cmd:
         {
